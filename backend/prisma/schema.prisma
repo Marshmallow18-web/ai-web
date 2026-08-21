@@ -1,5 +1,5 @@
-// DevSight AI — core data model
-// Maps directly to PRD sections 5 (features) and 6 (architecture)
+// DevSight AI — PostgreSQL core data model
+// Enterprise multi-tenant observability copilot schema
 
 generator client {
   provider = "prisma-client-js"
@@ -40,94 +40,156 @@ enum AlertChannel {
   EMAIL
   SLACK
   TEAMS
+  WEBHOOK
 }
 
 model Organization {
-  id        String    @id @default(cuid())
-  name      String
-  planTier  PlanTier  @default(STARTER)
-  createdAt DateTime  @default(now())
+  id                   String        @id @default(cuid())
+  name                 String
+  slug                 String?       @unique
+  planTier             PlanTier      @default(STARTER)
+  apiKey               String        @unique @default(cuid())
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
-  users    User[]
-  services Service[]
+  users        User[]
+  services     Service[]
+  alertConfigs AlertConfig[]
 }
 
 model User {
   id             String       @id @default(cuid())
   email          String       @unique
-  passwordHash   String
+  passwordHash   String?
   name           String
   role           Role         @default(DEVELOPER)
+  provider       String       @default("LOCAL") // LOCAL | GOOGLE | GITHUB
+  providerId     String?
+  avatarUrl      String?
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
-}
-
-// A monitored microservice / infra component
-model Service {
-  id             String        @id @default(cuid())
-  name           String
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id])
-  status         ServiceStatus @default(UNKNOWN)
-  baselineMs     Float?        // learned "normal" latency baseline, e.g. 200ms
-  createdAt      DateTime      @default(now())
-
-  metrics   Metric[]
-  logs      LogEntry[]
-  incidents Incident[]
 
   @@index([organizationId])
 }
 
-// Time-series metric points ingested from Prometheus/OTel
+// A monitored microservice / cloud infrastructure component
+model Service {
+  id                String        @id @default(cuid())
+  name              String
+  organizationId    String
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  status            ServiceStatus @default(UNKNOWN)
+  baselineMs        Float?        // Learned latency baseline (e.g. 150ms)
+  baselineErrorRate Float?        // Learned error rate baseline (e.g. 0.01)
+  baselineCpu       Float?        // Learned CPU utilization baseline (e.g. 45%)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  metrics   Metric[]
+  logs      LogEntry[]
+  traces    TraceSpan[]
+  incidents Incident[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+// Time-series metric points ingested from Prometheus / OpenTelemetry / Custom agents
 model Metric {
   id        String   @id @default(cuid())
   serviceId String
-  service   Service  @relation(fields: [serviceId], references: [id])
-  name      String // e.g. "latency_ms", "cpu_percent", "error_rate"
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  name      String   // e.g. "latency_ms", "cpu_percent", "error_rate", "memory_usage_mb"
   value     Float
+  labels    Json?    // Optional key-value Prometheus/OTel labels
   timestamp DateTime @default(now())
 
   @@index([serviceId, name, timestamp])
 }
 
-// Raw/streamed log lines ingested from Loki or direct upload
+// Raw/streamed log lines ingested from Loki, Promtail, FluentBit, or direct HTTP push
 model LogEntry {
-  id        String   @id @default(cuid())
-  serviceId String
-  service   Service  @relation(fields: [serviceId], references: [id])
-  level     String // info | warn | error
-  message   String
-  timestamp DateTime @default(now())
+  id         String   @id @default(cuid())
+  serviceId  String
+  service    Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  level      String   // info | warn | error | fatal | debug
+  message    String
+  attributes Json?    // Structured log context or metadata
+  timestamp  DateTime @default(now())
 
   @@index([serviceId, timestamp])
 }
 
-// AI-generated structured root cause report
+// OpenTelemetry Trace Spans ingested via OTLP receiver
+model TraceSpan {
+  id           String   @id @default(cuid())
+  serviceId    String
+  service      Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  traceId      String
+  spanId       String
+  parentSpanId String?
+  name         String   // Span operation name (e.g. "HTTP POST /v1/checkout", "pg.query SELECT")
+  durationMs   Float
+  statusCode   String   @default("OK") // OK | ERROR | UNSET
+  error        String?
+  attributes   Json?
+  timestamp    DateTime @default(now())
+
+  @@index([serviceId, timestamp])
+  @@index([traceId])
+}
+
+// Autonomous AI-diagnosed structured Incident
 model Incident {
-  id          String         @id @default(cuid())
-  serviceId   String
-  service     Service        @relation(fields: [serviceId], references: [id])
-  status      IncidentStatus @default(OPEN)
-  whatFailed  String
-  whyReason   String
-  impact      String
-  suggestedFix String
-  rawContext  Json? // metrics + logs snapshot used for the analysis
-  createdAt   DateTime       @default(now())
-  resolvedAt  DateTime?
+  id                     String         @id @default(cuid())
+  serviceId              String
+  service                Service        @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  status                 IncidentStatus @default(OPEN)
+  severity               String         @default("HIGH") // CRITICAL | HIGH | MEDIUM | LOW
+  whatFailed             String
+  whyReason              String
+  impact                 String
+  suggestedFix           String
+  confidence             Float          @default(0.92)
+  timeToRootCauseSeconds Float          @default(1.8)
+  correlatedSignals      Json?          // Array of correlated metric anomalies, log alerts, and slow spans
+  postmortemDraft        String?        // Full Markdown postmortem document
+  rawContext             Json?          // Snapshot of telemetry passed to LLM + audit metadata
+  createdAt              DateTime       @default(now())
+  resolvedAt             DateTime?
 
   alerts Alert[]
 
   @@index([serviceId, status])
 }
 
+// Outbound alert dispatches to Slack, Teams, Email, or Webhooks
 model Alert {
   id         String       @id @default(cuid())
   incidentId String
-  incident   Incident     @relation(fields: [incidentId], references: [id])
+  incident   Incident     @relation(fields: [incidentId], references: [id], onDelete: Cascade)
   channel    AlertChannel
+  recipient  String?
+  payload    Json?
   sentAt     DateTime     @default(now())
   success    Boolean      @default(true)
+  error      String?
+
+  @@index([incidentId])
+}
+
+// Organization-level Alert Channel Configurations
+model AlertConfig {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel        AlertChannel
+  target         String       // Webhook URL or Email address list
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
 }

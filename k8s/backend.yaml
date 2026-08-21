@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devsight-backend
+  namespace: devsight-ai
+  labels:
+    app: devsight-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devsight-backend
+  template:
+    metadata:
+      labels:
+        app: devsight-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/devsight-ai/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: devsight-config
+            - secretRef:
+                name: devsight-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1024Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devsight-backend-svc
+  namespace: devsight-ai
+spec:
+  type: ClusterIP
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http
+  selector:
+    app: devsight-backend

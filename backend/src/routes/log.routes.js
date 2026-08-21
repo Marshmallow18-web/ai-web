@@ -13,27 +13,36 @@ try {
 
 const ingestSchema = z.object({
   serviceId: z.string(),
-  level: z.enum(["info", "warn", "error"]).default("info"),
+  level: z.enum(["info", "warn", "error", "fatal", "debug"]).default("info"),
   message: z.string().min(1),
+  attributes: z.record(z.any()).optional(),
 });
 
-// Ingest a single log line
+// Ingest single log line
 router.post("/ingest", async (req, res, next) => {
   try {
     const data = ingestSchema.parse(req.body);
     const service = await prisma.service.findFirst({
       where: { id: data.serviceId, organizationId: req.user.organizationId },
     });
-    if (!service) return res.status(404).json({ error: "Service not found" });
+    if (!service) return res.status(404).json({ error: "Service not found in organization" });
 
-    const log = await prisma.logEntry.create({ data });
+    const log = await prisma.logEntry.create({
+      data: {
+        serviceId: data.serviceId,
+        level: data.level,
+        message: data.message,
+        attributes: data.attributes ? JSON.stringify(data.attributes) : null,
+      },
+    });
+
     res.status(201).json(log);
   } catch (err) {
     next(err);
   }
 });
 
-// Query logs with filtering (serviceId, level, search, limit)
+// Query logs with multi-factor filtering
 router.get("/", async (req, res, next) => {
   try {
     const { serviceId, level, search, limit } = req.query;
@@ -44,18 +53,18 @@ router.get("/", async (req, res, next) => {
     if (serviceId) {
       where.serviceId = String(serviceId);
     }
-    if (level && ["info", "warn", "error"].includes(String(level).toLowerCase())) {
+    if (level && ["info", "warn", "error", "fatal", "debug"].includes(String(level).toLowerCase())) {
       where.level = String(level).toLowerCase();
     }
     if (search) {
-      where.message = { contains: String(search), mode: "insensitive" };
+      where.message = { contains: String(search) };
     }
 
     const logs = await prisma.logEntry.findMany({
       where,
       include: { service: { select: { id: true, name: true } } },
       orderBy: { timestamp: "desc" },
-      take: Math.min(Number(limit) || 100, 300),
+      take: Math.min(Number(limit) || 150, 400),
     });
 
     res.json(logs);
@@ -64,7 +73,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// Query logs for a specific service
+// Query logs for a single service
 router.get("/:serviceId", async (req, res, next) => {
   try {
     const logs = await prisma.logEntry.findMany({
@@ -81,9 +90,9 @@ router.get("/:serviceId", async (req, res, next) => {
   }
 });
 
-// Explain raw log / stack trace using AI with smart heuristic fallback
 const explainSchema = z.object({ rawLog: z.string().min(1) });
 
+// AI Log Explainer: Translates arbitrary stack traces & logs into plain English
 router.post("/explain", async (req, res, next) => {
   try {
     const { rawLog } = explainSchema.parse(req.body);
@@ -96,9 +105,9 @@ router.post("/explain", async (req, res, next) => {
           model: "claude-3-7-sonnet-20250219",
           max_tokens: 400,
           system:
-            "You explain raw application/infra log output in plain English for engineers. " +
-            "Be concise: 2-4 sentences. Name the likely root cause and one concrete next step. " +
-            "If the log is too ambiguous to interpret, say so plainly.",
+            "You are an expert DevOps and SRE assistant inside DevSight AI. " +
+            "Explain raw application/infra log output or stack traces in plain English for developers. " +
+            "Be concise (2-4 sentences). State the likely root cause and give one concrete actionable fix.",
           messages: [{ role: "user", content: rawLog.slice(0, 8000) }],
         });
 
@@ -127,22 +136,25 @@ function generateHeuristicLogExplanation(raw) {
   const text = raw.toLowerCase();
 
   if (text.includes("connection pool") || text.includes("pool exhausted") || text.includes("econnrefused")) {
-    return "The application failed because its database connection pool reached maximum capacity and incoming requests timed out waiting for an open connection. Recommended next step: increase the connection pool size in your database client config and check for unindexed or slow queries holding locks.";
+    return "The application failed because its database connection pool reached maximum capacity (all connections active) and incoming queries timed out waiting for an open connection. Recommended action: increase connection pool limits in database client settings and check for unindexed or slow queries holding locks.";
   }
   if (text.includes("504") || text.includes("gateway timeout") || text.includes("etimedout")) {
-    return "A 504 Gateway Timeout occurred because an upstream service or proxy took too long to respond to an internal HTTP request. Recommended next step: verify the health and latency of the upstream microservice and inspect network routing rules.";
+    return "A 504 Gateway Timeout occurred because an upstream proxy or internal microservice took longer than the configured timeout window to respond. Recommended action: verify downstream microservice health, increase HTTP client timeout thresholds, or add circuit-breaker retry policies.";
   }
   if (text.includes("out of memory") || text.includes("heap limit") || text.includes("javascript heap out of memory")) {
-    return "The process ran out of allocated memory (OOM), likely due to a memory leak or processing large payloads in memory all at once. Recommended next step: increase Node.js --max-old-space-size or stream large data sets instead of buffering them in RAM.";
+    return "The process was killed because it exceeded allocated RAM ceiling (OOM error), typically triggered by an in-memory buffer leak or unpaginated large database query. Recommended action: increase container memory limit (--max-old-space-size) and stream large responses instead of buffering in RAM.";
   }
   if (text.includes("rate limit") || text.includes("429") || text.includes("too many requests")) {
-    return "The request was rejected due to hitting an API rate limit threshold (HTTP 429). Recommended next step: check if a client is generating excessive request bursts and verify your backoff/retry jitter strategy.";
+    return "The request was rejected due to an active rate limiter (HTTP 429). Recommended action: check client burst patterns, inspect rate limit configuration, and apply exponential backoff with jitter on retries.";
   }
   if (text.includes("jwks") || text.includes("unauthorized") || text.includes("jwt") || text.includes("401") || text.includes("invalid token")) {
-    return "Authentication failed because the provided access token is missing, expired, or signed with an invalid cryptographic key. Recommended next step: inspect token expiration timestamps and ensure the auth secret/keys match across microservices.";
+    return "Authentication failed because the access token is invalid, expired, or failed signature verification against JWKS public keys. Recommended action: verify token expiration timestamps and ensure auth signing keys match across microservices.";
   }
   if (text.includes("syntaxerror") || text.includes("typeerror") || text.includes("cannot read property") || text.includes("undefined")) {
-    return "A runtime JavaScript exception occurred due to accessing an undefined property or object reference. Recommended next step: add null checks or optional chaining (?.) at the stack trace line number referenced in the log.";
+    return "A JavaScript runtime exception occurred due to dereferencing an undefined property or missing object. Recommended action: inspect the line number indicated in the stack trace and implement defensive optional chaining (?.) or null validation.";
+  }
+  if (text.includes("deadlock") || text.includes("lock wait timeout")) {
+    return "A database deadlock occurred when concurrent transactions attempted to acquire mutually conflicting locks in opposing sequence. Recommended action: enforce consistent table access ordering across transactions and reduce transaction scope.";
   }
 
   return `Log analysis: The log entry indicates an operational event: "${raw.slice(0, 120).trim()}...". Review recent dependency response times and check service error logs around this timestamp.`;

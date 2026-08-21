@@ -7,109 +7,118 @@ datasource db {
   url      = env("DATABASE_URL_SQLITE")
 }
 
-enum Role {
-  ADMIN
-  DEVOPS_ENGINEER
-  DEVELOPER
-  MANAGER
-}
-
-enum PlanTier {
-  STARTER
-  PROFESSIONAL
-  ENTERPRISE
-}
-
-enum ServiceStatus {
-  HEALTHY
-  DEGRADED
-  DOWN
-  UNKNOWN
-}
-
-enum IncidentStatus {
-  OPEN
-  INVESTIGATING
-  RESOLVED
-}
-
-enum AlertChannel {
-  EMAIL
-  SLACK
-  TEAMS
-}
-
 model Organization {
-  id        String    @id @default(cuid())
-  name      String
-  planTier  PlanTier  @default(STARTER)
-  createdAt DateTime  @default(now())
+  id                   String        @id @default(cuid())
+  name                 String
+  slug                 String?       @unique
+  planTier             String        @default("STARTER") // STARTER | PROFESSIONAL | ENTERPRISE
+  apiKey               String        @unique @default(cuid())
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
-  users    User[]
-  services Service[]
+  users        User[]
+  services     Service[]
+  alertConfigs AlertConfig[]
 }
 
 model User {
   id             String       @id @default(cuid())
   email          String       @unique
-  passwordHash   String
+  passwordHash   String?
   name           String
-  role           Role         @default(DEVELOPER)
+  role           String       @default("DEVELOPER") // ADMIN | DEVOPS_ENGINEER | DEVELOPER | MANAGER
+  provider       String       @default("LOCAL") // LOCAL | GOOGLE | GITHUB
+  providerId     String?
+  avatarUrl      String?
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
 }
 
 model Service {
-  id             String        @id @default(cuid())
-  name           String
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id])
-  status         ServiceStatus @default(UNKNOWN)
-  baselineMs     Float?
-  createdAt      DateTime      @default(now())
+  id                String        @id @default(cuid())
+  name              String
+  organizationId    String
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  status            String        @default("UNKNOWN") // HEALTHY | DEGRADED | DOWN | UNKNOWN
+  baselineMs        Float?
+  baselineErrorRate Float?
+  baselineCpu       Float?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 
   metrics   Metric[]
   logs      LogEntry[]
+  traces    TraceSpan[]
   incidents Incident[]
 
+  @@unique([organizationId, name])
   @@index([organizationId])
 }
 
 model Metric {
   id        String   @id @default(cuid())
   serviceId String
-  service   Service  @relation(fields: [serviceId], references: [id])
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   name      String
   value     Float
+  labels    String?  // JSON stringified labels
   timestamp DateTime @default(now())
 
   @@index([serviceId, name, timestamp])
 }
 
 model LogEntry {
-  id        String   @id @default(cuid())
-  serviceId String
-  service   Service  @relation(fields: [serviceId], references: [id])
-  level     String
-  message   String
-  timestamp DateTime @default(now())
+  id         String   @id @default(cuid())
+  serviceId  String
+  service    Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  level      String   // info | warn | error | fatal | debug
+  message    String
+  attributes String?  // JSON stringified attributes
+  timestamp  DateTime @default(now())
 
   @@index([serviceId, timestamp])
 }
 
+model TraceSpan {
+  id           String   @id @default(cuid())
+  serviceId    String
+  service      Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  traceId      String
+  spanId       String
+  parentSpanId String?
+  name         String
+  durationMs   Float
+  statusCode   String   @default("OK") // OK | ERROR | UNSET
+  error        String?
+  attributes   String?  // JSON stringified attributes
+  timestamp    DateTime @default(now())
+
+  @@index([serviceId, timestamp])
+  @@index([traceId])
+}
+
 model Incident {
-  id          String         @id @default(cuid())
-  serviceId   String
-  service     Service        @relation(fields: [serviceId], references: [id])
-  status      IncidentStatus @default(OPEN)
-  whatFailed  String
-  whyReason   String
-  impact      String
-  suggestedFix String
-  rawContext  Json?
-  createdAt   DateTime       @default(now())
-  resolvedAt  DateTime?
+  id                     String    @id @default(cuid())
+  serviceId              String
+  service                Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  status                 String    @default("OPEN") // OPEN | INVESTIGATING | RESOLVED
+  severity               String    @default("HIGH") // CRITICAL | HIGH | MEDIUM | LOW
+  whatFailed             String
+  whyReason              String
+  impact                 String
+  suggestedFix           String
+  confidence             Float     @default(0.92)
+  timeToRootCauseSeconds Float     @default(1.8)
+  correlatedSignals      String?   // JSON stringified array
+  postmortemDraft        String?
+  rawContext             String?   // JSON stringified object
+  createdAt              DateTime  @default(now())
+  resolvedAt             DateTime?
 
   alerts Alert[]
 
@@ -117,10 +126,27 @@ model Incident {
 }
 
 model Alert {
-  id         String       @id @default(cuid())
+  id         String   @id @default(cuid())
   incidentId String
-  incident   Incident     @relation(fields: [incidentId], references: [id])
-  channel    AlertChannel
-  sentAt     DateTime     @default(now())
-  success    Boolean      @default(true)
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  channel    String   // EMAIL | SLACK | TEAMS | WEBHOOK
+  recipient  String?
+  payload    String?  // JSON stringified payload
+  sentAt     DateTime @default(now())
+  success    Boolean  @default(true)
+  error      String?
+
+  @@index([incidentId])
+}
+
+model AlertConfig {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel        String       // EMAIL | SLACK | TEAMS | WEBHOOK
+  target         String
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
 }

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devsight-frontend
+  namespace: devsight-ai
+  labels:
+    app: devsight-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devsight-frontend
+  template:
+    metadata:
+      labels:
+        app: devsight-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/devsight-ai/frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devsight-frontend-svc
+  namespace: devsight-ai
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+  selector:
+    app: devsight-frontend

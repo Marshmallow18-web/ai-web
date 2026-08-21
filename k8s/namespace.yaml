@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devsight-ai
+  labels:
+    app.kubernetes.io/name: devsight-ai
+    app.kubernetes.io/part-of: observability-platform

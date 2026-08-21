@@ -6,6 +6,8 @@ import Dashboard from "./pages/Dashboard";
 import Incidents from "./pages/Incidents";
 import IncidentDetail from "./pages/IncidentDetail";
 import LogAnalyzer from "./pages/LogAnalyzer";
+import Integrations from "./pages/Integrations";
+import Billing from "./pages/Billing";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -53,6 +55,22 @@ export default function App() {
             element={
               <Protected>
                 <LogAnalyzer />
+              </Protected>
+            }
+          />
+          <Route
+            path="/integrations"
+            element={
+              <Protected>
+                <Integrations />
+              </Protected>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <Protected>
+                <Billing />
               </Protected>
             }
           />

@@ -12,9 +12,10 @@ const ingestSchema = z.object({
   serviceId: z.string(),
   name: z.string().default("latency_ms"),
   value: z.number(),
+  labels: z.record(z.any()).optional(),
 });
 
-// This is what Prometheus/OTel exporters or agents POST to
+// Ingest metric point directly
 router.post("/ingest", async (req, res, next) => {
   try {
     const data = ingestSchema.parse(req.body);
@@ -22,13 +23,12 @@ router.post("/ingest", async (req, res, next) => {
     const service = await prisma.service.findFirst({
       where: { id: data.serviceId, organizationId: req.user.organizationId },
     });
-    if (!service) return res.status(404).json({ error: "Service not found" });
+    if (!service) return res.status(404).json({ error: "Service not found in organization" });
 
-    const anomaly = await recordMetricAndCheck(data.serviceId, data.name, data.value);
+    const anomaly = await recordMetricAndCheck(data.serviceId, data.name, data.value, data.labels);
 
     let incident = null;
-    if (anomaly.isAnomaly) {
-      // Create warning / error logs to give AI rich context
+    if (anomaly.isAnomaly && anomaly.shouldTriggerIncident) {
       await prisma.logEntry.create({
         data: {
           serviceId: service.id,
@@ -38,7 +38,7 @@ router.post("/ingest", async (req, res, next) => {
       });
 
       incident = await triggerIncidentAnalysis(service, anomaly).catch((err) => {
-        console.error("[metric.routes] incident analysis failed:", err);
+        console.error("[metric.routes] Incident analysis failed:", err);
         return null;
       });
     }
@@ -49,13 +49,13 @@ router.post("/ingest", async (req, res, next) => {
   }
 });
 
-// Quick simulator endpoint to test normal metrics or trigger an anomaly spike directly from UI
 const simulateSchema = z.object({
   serviceId: z.string(),
   type: z.enum(["NORMAL", "ANOMALY"]).default("ANOMALY"),
   multiplier: z.number().optional().default(8.5),
 });
 
+// Anomaly Simulator: triggers real telemetry burst, logs, trace spans, and AI incident diagnosis
 router.post("/simulate", async (req, res, next) => {
   try {
     const { serviceId, type, multiplier } = simulateSchema.parse(req.body);
@@ -63,25 +63,41 @@ router.post("/simulate", async (req, res, next) => {
     const service = await prisma.service.findFirst({
       where: { id: serviceId, organizationId: req.user.organizationId },
     });
-    if (!service) return res.status(404).json({ error: "Service not found" });
+    if (!service) return res.status(404).json({ error: "Service not found in organization" });
 
     const baseline = service.baselineMs || 150;
     let value;
 
     if (type === "ANOMALY") {
       value = Math.round(baseline * multiplier * 10) / 10;
+
+      // Seed realistic correlated warning and error logs
       await prisma.logEntry.create({
         data: {
           serviceId: service.id,
           level: "warn",
-          message: `Elevated concurrency on worker threads. Processing backlog queue size > 400 items.`,
+          message: `Elevated concurrency on worker threads (88% thread-pool active). Queue size > 350 requests.`,
         },
       });
+
       await prisma.logEntry.create({
         data: {
           serviceId: service.id,
           level: "error",
-          message: `Connection pool exhausted or upstream gateway timeout during transaction spike.`,
+          message: `Connection pool exhausted (active=50, max=50). Connection acquire timeout after 1500ms at pg-pool.`,
+        },
+      });
+
+      // Seed slow trace span
+      await prisma.traceSpan.create({
+        data: {
+          serviceId: service.id,
+          traceId: `trace_sim_${Date.now()}`,
+          spanId: `span_${Date.now()}`,
+          name: `HTTP POST /v1/transactions`,
+          durationMs: value,
+          statusCode: "ERROR",
+          error: "Connection pool exhausted",
         },
       });
     } else {
@@ -94,13 +110,13 @@ router.post("/simulate", async (req, res, next) => {
     let incident = null;
     if (anomaly.isAnomaly) {
       incident = await triggerIncidentAnalysis(service, anomaly).catch((err) => {
-        console.error("[metric.routes] incident analysis failed:", err);
+        console.error("[metric.routes] Incident analysis failed:", err);
         return null;
       });
     }
 
     res.json({
-      message: type === "ANOMALY" ? "Anomaly simulated and incident generated" : "Normal metric ingested",
+      message: type === "ANOMALY" ? "Anomaly simulated and autonomous incident generated" : "Normal metric point ingested",
       value,
       anomaly,
       incident,
@@ -110,6 +126,7 @@ router.post("/simulate", async (req, res, next) => {
   }
 });
 
+// Query recent metrics for a service
 router.get("/:serviceId", async (req, res, next) => {
   try {
     const metrics = await prisma.metric.findMany({
